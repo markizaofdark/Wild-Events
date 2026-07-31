@@ -36,17 +36,17 @@ const DEFAULTS = {
 // `desc` is what the Lite engine injects instead of a concrete event —
 // the model invents the event itself from the tier's scale.
 const SCALES = [
-    { min: 1,  max: 10, id: 'NONE',         name: 'NO CHANGE',       adj: null,
+    { min: 1,  max: 12, id: 'NONE',         name: 'NO CHANGE',       adj: null,
       desc: 'No forced external change. The story continues under its own momentum.' },
-    { min: 11, max: 14, id: 'SUBTLE',       name: 'SUBTLE CHANGE',    adj: null,
+    { min: 13, max: 16, id: 'SUBTLE',       name: 'SUBTLE CHANGE',    adj: null,
       desc: 'A minor obstacle or a small lucky break. Nothing that redirects the scene.' },
-    { min: 15, max: 18, id: 'MINOR',        name: 'MINOR TWIST',      adj: null,
+    { min: 17, max: 20, id: 'MINOR',        name: 'MINOR TWIST',      adj: null,
       desc: 'A meaningful turn that changes immediate priorities.' },
-    { min: 19, max: 22, id: 'TURNING',      name: 'TURNING POINT',    adj: 'reduce25',
+    { min: 21, max: 24, id: 'TURNING',      name: 'TURNING POINT',    adj: 'reduce25',
       desc: 'A turning point: the current course of the scene is redirected and cannot simply resume.' },
-    { min: 23, max: 26, id: 'MAJOR',        name: 'MAJOR TWIST',      adj: 'reduce50',
+    { min: 25, max: 28, id: 'MAJOR',        name: 'MAJOR TWIST',      adj: 'reduce50',
       desc: 'A weighty event that significantly changes the current situation and its stakes.' },
-    { min: 27, max: 99, id: 'WORLDSHAKING', name: 'WORLD-SHAKING',    adj: 'reset',
+    { min: 29, max: 99, id: 'WORLDSHAKING', name: 'WORLD-SHAKING',    adj: 'reset',
       desc: 'A sudden, sweeping event — a catastrophe, a brutal betrayal, a massive secret revealed, an irreversible upheaval, a life-altering stroke of fortune.' },
 ];
 
@@ -1471,18 +1471,56 @@ function tickThreads() {
 function maybeSeedThread(eventText) {
     const s = extension_settings[EXT];
     const themeId = THREAD_SEEDS[eventText];
-    if (!themeId) return;
+    if (!themeId) return null;
     const threads = getThreads();
-    if (threads.length >= (s.maxThreads ?? DEFAULTS.maxThreads)) return;
-    if (threads.some(t => t.id === themeId)) return;
+    if (threads.length >= (s.maxThreads ?? DEFAULTS.maxThreads)) return null;
+    if (threads.some(t => t.id === themeId)) return null;
     threads.push({ id: themeId, age: 0 });
     getContext().saveMetadata();
+    return themeId;
 }
 
 function closeThread(themeId) {
     const ctx = getContext();
     if (!ctx.chatMetadata?.we_threads) return;
     ctx.chatMetadata.we_threads = ctx.chatMetadata.we_threads.filter(t => t.id !== themeId);
+    ctx.saveMetadata();
+}
+
+// Fire a specific thread's payoff at a given tier. Handles close/chain.
+function fireThreadPayoff(thread, scaleId, isPositive) {
+    const fromStage = !!thread.stage;
+    const pools = fromStage ? THREAD_STAGES[thread.stage]?.payoffs : THREAD_PAYOFFS[thread.id];
+    if (!pools) return null;
+    const pool = (isPositive ? pools.pos : pools.neg)?.[scaleId];
+    if (!pool?.length) return null;
+    const eventText = pool[Math.floor(Math.random() * pool.length)];
+    const followup = !fromStage ? THREAD_FOLLOWUPS[thread.id]?.[isPositive ? 'pos' : 'neg'] : null;
+    if (followup && THREAD_STAGES[followup] && Math.random() < CHAIN_CHANCE) {
+        thread.stage = followup;
+        thread.age = 0;
+        getContext().saveMetadata();
+    } else {
+        closeThread(thread.id);
+    }
+    return eventText;
+}
+
+// ── Debug log ─────────────────────────────────────────────────
+
+function getDebugLog() {
+    const ctx = getContext();
+    if (!ctx.chatMetadata) return [];
+    if (!ctx.chatMetadata.we_debug_log) ctx.chatMetadata.we_debug_log = [];
+    return ctx.chatMetadata.we_debug_log;
+}
+
+function addDebugEntry(entry) {
+    const ctx = getContext();
+    if (!ctx.chatMetadata) return;
+    if (!ctx.chatMetadata.we_debug_log) ctx.chatMetadata.we_debug_log = [];
+    ctx.chatMetadata.we_debug_log.push(entry);
+    if (ctx.chatMetadata.we_debug_log.length > 20) ctx.chatMetadata.we_debug_log.shift();
     ctx.saveMetadata();
 }
 
@@ -2858,75 +2896,150 @@ function runEvent(isNewMessage) {
 
     if (isNewMessage) {
         updateDetectedMode();
-        // Threads are frozen in lite mode: they cannot fire, so they must not
-        // age out either — otherwise a spell in lite would quietly kill them.
         if (!lite) tickThreads();
     }
     const modeId = getEffectiveModeId();
     const mode = SCENE_MODES[modeId] || SCENE_MODES.NEUTRAL;
 
+    // ── Tension step ──
     let tension = getTension();
-    if (isNewMessage) { tension = Math.min(100, tension + s.step * mode.tensionMult); saveTension(tension); }
+    const tensionBefore = tension;
+    let tensionStep = 0;
+    if (isNewMessage) {
+        tensionStep = s.step * (mode.tensionMult ?? 1);
+        tension = Math.min(100, tension + tensionStep);
+        saveTension(tension);
+    }
 
-    let baseRoll, modifier, finalScore, isPositive, scale;
-    let forced = false;
+    // ── Roll ──
+    let baseRoll = Math.floor(Math.random() * 20) + 1;
+    let modifier = Math.floor(tension / 8);
+    let isPositive = Math.random() < (mode.posBias ?? 0.5);
+    let finalScore, forced = false;
 
-    baseRoll = Math.floor(Math.random() * 20) + 1;
-    modifier = Math.floor(tension / 8);
-    isPositive = Math.random() < (mode.posBias ?? 0.5);
-
-    if (tension >= 100) { forced = true; finalScore = 27; }
+    if (tension >= 100) { forced = true; finalScore = 29; }
     else { finalScore = baseRoll + modifier; }
 
-    // Mode gate: quiet modes (Intimate, Calm) suppress part of the events entirely.
-    if (!forced && finalScore > 10 && Math.random() > mode.eventChance) finalScore = 1;
+    // Mode gate: quiet modes suppress events entirely with probability.
+    if (!forced && finalScore > 12 && Math.random() > (mode.eventChance ?? 1)) finalScore = 1;
 
-    // Tension relief is judged on the UNCAPPED scale, so a forced event in a
-    // capped mode still resets tension instead of forcing every message.
-    const scaleForAdj = findScale(finalScore);
-    if (isNewMessage) {
-        if (scaleForAdj.adj === 'reset') saveTension(0);
-        else if (scaleForAdj.adj === 'reduce50') saveTension(tension * 0.5);
-        else if (scaleForAdj.adj === 'reduce25') saveTension(tension * 0.75);
-    }
-
-    // WORLDSHAKING needs an established story — in young chats it caps at MAJOR.
-    // Applies to forced events too (tension already relieved via scaleForAdj above).
+    // WORLDSHAKING needs an established story — in young chats cap at MAJOR.
     const chatLen = (getContext().chat || []).length;
     if (chatLen < (s.wsMinMsgs ?? DEFAULTS.wsMinMsgs)) {
-        finalScore = Math.min(finalScore, 26);
+        finalScore = Math.min(finalScore, 28);
     }
 
-    // Tier cap: Intimate never escalates past MINOR, Personal/Calm past TURNING.
+    // Tier cap from mode (Intimate → MINOR, Personal/Calm → TURNING).
     if (mode.tierCap) {
         const cap = SCALES.find(x => x.id === mode.tierCap);
         if (cap) finalScore = Math.min(finalScore, cap.max);
     }
-    scale = findScale(finalScore);
 
-    // Lite mode stops here: the tier and impact are the whole instruction, and
-    // the model invents the event. Pools, categories and threads stay untouched,
-    // so switching back to default resumes exactly where it left off.
-    let category = null, eventType = null, threadPayoff = null, threadAct3 = false;
+    let scale = findScale(finalScore);
+
+    // ── Tension adjustment (uses CAPPED scale) ──
+    // Forced events always reset; otherwise use the post-cap tier so that a
+    // roll capped from TURNING to MINOR doesn't silently drain tension.
+    let tensionAdj = null;
+    if (isNewMessage) {
+        if (forced) {
+            tensionAdj = 'reset';
+            saveTension(0);
+        } else if (scale.adj === 'reset') {
+            tensionAdj = 'reset';
+            saveTension(0);
+        } else if (scale.adj === 'reduce50') {
+            tensionAdj = 'reduce50';
+            saveTension(getTension() * 0.5);
+        } else if (scale.adj === 'reduce25') {
+            tensionAdj = 'reduce25';
+            saveTension(getTension() * 0.75);
+        }
+    }
+
+    // ── Thread boost ──
+    // Active threads can promote a quiet roll (NONE/SUBTLE) to MINOR,
+    // giving their payoff a chance to fire without waiting for a natural high roll.
+    let threadBoost = false;
+    let boostingThread = null;
+    if (!lite && !forced && (scale.id === 'NONE' || scale.id === 'SUBTLE')) {
+        const eligible = getThreads().filter(t => t.age >= 3);
+        for (const t of eligible) {
+            const theme = THREAD_THEMES.find(x => x.id === t.id);
+            if (!theme) continue;
+            const fromStage = !!t.stage;
+            const pools = fromStage ? THREAD_STAGES[t.stage]?.payoffs : THREAD_PAYOFFS[t.id];
+            const pool = (isPositive ? pools?.pos : pools?.neg)?.['MINOR'];
+            if (!pool?.length) continue;
+            const affinity = theme.aff[modeId] ?? 1;
+            const boostChance = Math.min(0.4, 0.05 + t.age * 0.015) * affinity;
+            if (Math.random() < boostChance) {
+                finalScore = 17;
+                scale = findScale(finalScore);
+                threadBoost = true;
+                boostingThread = t;
+                break;
+            }
+        }
+    }
+
+    // ── Event selection ──
+    let category = null, eventType = null, threadPayoff = null, threadAct3 = false, threadSeeded = null;
 
     if (!lite) {
         category = pickCategory(mode);
         incrementCategoryCount(category.id);
 
-        // Threads first: a ripe payoff overrides the random pick (and either
-        // closes its thread or chains it into act three).
-        const payoff = tryThreadPayoff(modeId, scale.id, isPositive);
-        if (payoff) {
-            eventType = payoff.eventText;
-            threadPayoff = payoff.themeId;
-            threadAct3 = payoff.act3;
-        } else {
-            eventType = pickEventType(scale.id, category.id, isPositive, mode);
-            if (eventType) maybeSeedThread(eventType);
+        // If a thread triggered the boost, fire its payoff directly.
+        if (threadBoost && boostingThread) {
+            const evt = fireThreadPayoff(boostingThread, 'MINOR', isPositive);
+            if (evt) {
+                eventType = evt;
+                threadPayoff = boostingThread.id;
+                threadAct3 = !!boostingThread.stage;
+            }
+        }
+
+        if (!eventType) {
+            const payoff = tryThreadPayoff(modeId, scale.id, isPositive);
+            if (payoff) {
+                eventType = payoff.eventText;
+                threadPayoff = payoff.themeId;
+                threadAct3 = payoff.act3;
+            } else {
+                eventType = pickEventType(scale.id, category.id, isPositive, mode);
+                if (eventType) threadSeeded = maybeSeedThread(eventType);
+            }
         }
     }
 
-    const result = { tension: getTension(), baseRoll, modifier, finalScore, isPositive, scale, category, forced, eventType, modeId, mode, threadPayoff, threadAct3, lite };
+    const result = {
+        tension: getTension(), baseRoll, modifier, finalScore, isPositive, scale,
+        category, forced, eventType, modeId, mode, threadPayoff, threadAct3, lite,
+        tensionBefore, tensionStep, tensionAdj, threadBoost, threadSeeded,
+    };
+
+    // Debug log
+    if (isNewMessage) {
+        addDebugEntry({
+            msgNum: chatLen,
+            baseRoll, modifier, rawScore: baseRoll + modifier, finalScore,
+            scaleId: scale.id,
+            mode: modeId,
+            modeSource: s.modeSource === 'manual' ? 'manual' : (s.modeLock ? 'locked' : 'auto'),
+            tensionBefore, tensionStep, tensionAdj, tensionAfter: getTension(),
+            eventText: eventType || (lite ? `[lite: ${scale.id}]` : null),
+            category: category?.id || null,
+            isPositive,
+            threadPayoff, threadSeeded, threadBoost,
+            threads: getThreads().map(t => ({
+                id: t.id, age: t.age, stage: t.stage || null,
+                name: (t.stage && THREAD_STAGES[t.stage]) ? THREAD_STAGES[t.stage].name :
+                      THREAD_THEMES.find(x => x.id === t.id)?.name || t.id,
+            })),
+        });
+    }
+
     const prompt = formatPrompt(result);
     setExtensionPrompt(EXT, prompt, 1, s.depth, false, 0);
 
@@ -2935,6 +3048,7 @@ function runEvent(isNewMessage) {
 
     updateUI(result);
     if (s.showBadge) updateWidget(result);
+    updateDebugPanel();
 }
 
 // ── Generation hooks ───────────────────────────────────────
@@ -3124,6 +3238,79 @@ function syncEngineUI() {
     if (lite) { $('#we_category_row').hide(); $('#we_type_row').hide(); }
 }
 
+// ── Debug panel ───────────────────────────────────────────
+
+function updateDebugPanel() {
+    const s = extension_settings[EXT];
+    const r = s._lastResult;
+    const $c = $('#we_debug_content');
+    if (!$c.length) return;
+    if (!r) {
+        $c.html('<div style="opacity:0.5;text-align:center;font-style:italic;">Waiting for first event…</div>');
+        return;
+    }
+
+    const threads = getThreads();
+    const threadRows = threads.length ? threads.map(t => {
+        const theme = THREAD_THEMES.find(x => x.id === t.id);
+        const name = (t.stage && THREAD_STAGES[t.stage]) ? THREAD_STAGES[t.stage].name : (theme?.name || t.id);
+        const payoffBase = t.age >= 3 ? Math.min(0.85, 0.1 + t.age * 0.03) : 0;
+        const affinity = theme ? (theme.aff[r.modeId] ?? 1) : 1;
+        const payoffPct = (payoffBase * affinity * 100).toFixed(0);
+        const boostPct = t.age >= 3 ? (Math.min(0.4, 0.05 + t.age * 0.015) * affinity * 100).toFixed(0) : '0';
+        return `<div style="padding:2px 0;">• <b>${name}</b> <span style="opacity:0.5;">[${t.id}]</span>`
+             + `<br><span style="opacity:0.5;margin-left:12px;">age ${t.age}${t.stage ? ', act 3' : ''} · payoff ${payoffPct}% · boost ${boostPct}%</span></div>`;
+    }).join('') : '<span style="opacity:0.4;">—</span>';
+
+    const stepDisplay = `${s.step} × ${(r.mode?.tensionMult ?? 1).toFixed(1)} = +${(r.tensionStep ?? 0).toFixed(2)}`;
+    const adjDisplay = r.tensionAdj ? ` → ${r.tensionAdj}` : '';
+
+    $c.html(`
+        <div class="we_dbg_section"><b>Roll</b></div>
+        <div>d20=${r.baseRoll} + mod ${r.modifier} = ${r.baseRoll + r.modifier}${r.forced ? ' → <b style="color:#ffa726;">FORCED</b>' : ''}</div>
+        <div>Final: ${r.finalScore} → <b>${r.scale.name}</b></div>
+        ${r.threadBoost ? '<div style="color:#ffa726;">⬆ Thread boost → MINOR</div>' : ''}
+
+        <div class="we_dbg_section"><b>Tension</b></div>
+        <div>${(r.tensionBefore ?? 0).toFixed(1)}% ${stepDisplay}${adjDisplay} = <b>${r.tension.toFixed(1)}%</b></div>
+
+        <div class="we_dbg_section"><b>Mode</b></div>
+        <div>${SCENE_MODES[r.modeId]?.name || r.modeId} <span style="opacity:0.5;">(${s.modeSource === 'manual' ? 'manual' : s.modeLock ? 'locked' : 'auto'})</span></div>
+        <div style="opacity:0.45;font-size:0.9em;">tensionMult=${(r.mode?.tensionMult ?? 1)} · eventChance=${(r.mode?.eventChance ?? 1)} · tierCap=${r.mode?.tierCap || '—'} · pace=${r.mode?.pace || 'any'}</div>
+
+        <div class="we_dbg_section"><b>Event</b></div>
+        ${r.scale.id === 'NONE'
+            ? '<div style="opacity:0.4;">No event</div>'
+            : `<div>${r.isPositive ? '<span style="color:#66bb6a;">▲ POS</span>' : '<span style="color:#ef5350;">▼ NEG</span>'} · ${r.category?.name || (r.lite ? 'Lite' : '?')}</div>`}
+        ${r.eventType ? `<div style="opacity:0.7;font-style:italic;line-height:1.4;margin-top:2px;">"${r.eventType}"</div>` : ''}
+        ${r.threadPayoff ? `<div style="color:#ffa726;margin-top:2px;">↳ Thread payoff: ${THREAD_THEMES.find(x => x.id === r.threadPayoff)?.name || r.threadPayoff}${r.threadAct3 ? ' (act 3)' : ''}</div>` : ''}
+        ${r.threadSeeded ? `<div style="color:#66bb6a;margin-top:2px;">↳ Thread seeded: ${THREAD_THEMES.find(x => x.id === r.threadSeeded)?.name || r.threadSeeded}</div>` : ''}
+
+        <div class="we_dbg_section"><b>Threads</b></div>
+        ${threadRows}
+    `);
+
+    // Event log
+    const log = getDebugLog();
+    const $log = $('#we_debug_log');
+    if ($log.length && log.length) {
+        $log.html(log.slice().reverse().map((e, i) => {
+            const sc = e.scaleId === 'NONE' ? 'opacity:0.4;' : (e.isPositive ? 'color:#66bb6a;' : 'color:#ef5350;');
+            return `<div style="padding:4px 0;${i > 0 ? 'border-top:1px solid rgba(128,128,128,0.1);' : ''}">
+                <div style="display:flex;justify-content:space-between;gap:6px;">
+                    <span style="opacity:0.4;">#${e.msgNum}</span>
+                    <span style="${sc}font-weight:600;">${e.scaleId}</span>
+                    <span style="opacity:0.4;">T:${e.tensionAfter?.toFixed(1) ?? '?'}%</span>
+                </div>
+                ${e.eventText ? `<div style="opacity:0.55;font-size:0.9em;font-style:italic;margin-top:1px;line-height:1.3;">${e.eventText}</div>` : ''}
+                ${e.threadPayoff ? `<div style="color:#ffa726;font-size:0.9em;">↳ payoff: ${e.threadPayoff}</div>` : ''}
+                ${e.threadSeeded ? `<div style="color:#66bb6a;font-size:0.9em;">↳ seeded: ${e.threadSeeded}</div>` : ''}
+                ${e.threadBoost ? '<div style="color:#ffa726;font-size:0.9em;">↳ thread boost</div>' : ''}
+            </div>`;
+        }).join(''));
+    }
+}
+
 function toggleAccordion(bodyId, iconEl) {
     $(`#${bodyId}`).slideToggle(150);
     $(iconEl).toggleClass('we_acc_open');
@@ -3240,6 +3427,23 @@ function buildUI() {
                 </div>
             </div>
 
+            <!-- ── Accordion: Debug ── -->
+            <div class="we_accordion">
+                <div class="we_accordion_header" data-target="we_sec_debug">
+                    <span><i class="fa-solid fa-bug"></i> Debug</span>
+                    <i class="fa-solid fa-chevron-down we_acc_icon"></i>
+                </div>
+                <div class="we_accordion_body" id="we_sec_debug" style="display:none;">
+                    <div id="we_debug_content" style="font-size:0.82em;line-height:1.5;">
+                        <div style="opacity:0.5;text-align:center;font-style:italic;">Waiting for first event…</div>
+                    </div>
+                    <div style="margin-top:8px;">
+                        <button type="button" class="menu_button" id="we_debug_log_toggle" style="font-size:0.82em;width:100%;">Show event log</button>
+                    </div>
+                    <div id="we_debug_log" style="display:none;margin-top:6px;max-height:300px;overflow-y:auto;font-size:0.82em;"></div>
+                </div>
+            </div>
+
         </div>
     </div>`;
     $('#extensions_settings').append(html);
@@ -3318,6 +3522,14 @@ jQuery(async () => {
     $('#we_max_threads').on('input', function () { s.maxThreads = parseInt(this.value) || DEFAULTS.maxThreads; saveSettingsDebounced(); });
     $('#we_thread_age').on('input', function () { s.threadMaxAge = parseInt(this.value) || DEFAULTS.threadMaxAge; saveSettingsDebounced(); });
 
+    // debug
+    $('#we_debug_log_toggle').on('click', function () {
+        const $log = $('#we_debug_log');
+        const vis = $log.is(':visible');
+        $log.slideToggle(150);
+        $(this).text(vis ? 'Show event log' : 'Hide event log');
+    });
+
     $('#we_reset').on('click', () => {
         saveTension(0); updateUI(null);
         $('#we_roll_val').text('—'); $('#we_event_val').text('—').css('color', '');
@@ -3344,5 +3556,6 @@ jQuery(async () => {
         $('#we_category_row').hide();
         $('#we_widget').hide();
         syncModeControls();
+        updateDebugPanel();
     });
 });

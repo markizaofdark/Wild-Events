@@ -453,6 +453,28 @@
     filter: grayscale(1) brightness(10) contrast(0.12);
 }
 
+/* ── Debug panel ────────────────────────────────────────── */
+
+.we_dbg_section {
+    margin-top: 8px;
+    margin-bottom: 3px;
+    padding-bottom: 2px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
+    opacity: 0.55;
+    font-size: 0.9em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.we_dbg_section:first-child {
+    margin-top: 0;
+}
+
+#we_debug_log {
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor) 15%, transparent);
+    padding-top: 6px;
+}
+
 .we_fab_berry::after {
     content: '';
     position: absolute;
